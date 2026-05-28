@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: ai-avatar-wechat-mvp
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: OPENAI_MODEL
+        value: gpt-4.1-mini
+      - key: MAX_REPLY_CHARS
+        value: "180"
+      - key: HUMAN_HANDOFF_KEYWORDS
+        value: 付款,合同,退款,投诉,能便宜吗,转人工,本人,老板
+      - key: WECHAT_TOKEN
+        generateValue: true
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: AVATAR_SYSTEM_PROMPT
+        sync: false
+

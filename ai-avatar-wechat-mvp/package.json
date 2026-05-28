@@ -1,0 +1,14 @@
+{
+  "name": "ai-avatar-wechat-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MVP backend and planning package for a WeChat AI avatar.",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "NODE_ENV=development node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
+
