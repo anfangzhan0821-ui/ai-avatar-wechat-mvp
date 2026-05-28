@@ -9,16 +9,19 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: OPENAI_MODEL
-        value: gpt-4.1-mini
+      - key: AI_MODEL
+        value: deepseek-v4-flash
+      - key: AI_BASE_URL
+        value: https://api.deepseek.com
+      - key: AI_API_STYLE
+        value: chat_completions
       - key: MAX_REPLY_CHARS
         value: "180"
       - key: HUMAN_HANDOFF_KEYWORDS
         value: 付款,合同,退款,投诉,能便宜吗,转人工,本人,老板
       - key: WECHAT_TOKEN
         generateValue: true
-      - key: OPENAI_API_KEY
+      - key: AI_API_KEY
         sync: false
       - key: AVATAR_SYSTEM_PROMPT
         sync: false
-
