@@ -2,7 +2,7 @@ services:
   - type: web
     name: ai-avatar-wechat-mvp
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /health
