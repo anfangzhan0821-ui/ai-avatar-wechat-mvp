@@ -4,6 +4,10 @@ const crypto = require("crypto");
 const PORT = Number(process.env.PORT || 8787);
 const WECHAT_TOKEN = process.env.WECHAT_TOKEN || "dev-token";
 const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 180);
+const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
+const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
+const AI_MODEL = process.env.AI_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const AI_API_STYLE = process.env.AI_API_STYLE || "responses";
 const DEFAULT_SYSTEM_PROMPT =
   "你是微信里的 AI 客服助手。回复要简洁、自然、中文口语化。不确定就说需要本人确认。涉及付款、合同、退款、投诉、法律、医疗、投资、最终价格、折扣时必须转人工。";
 
@@ -73,22 +77,46 @@ async function generateAiReply(customerText) {
 
   const fallback = "你好，我是 AI 助手，可以先帮你解答常见问题。你可以简单说下你的需求、预算和希望解决的问题。";
 
-  if (!process.env.OPENAI_API_KEY) {
+  if (!AI_API_KEY) {
     return fallback;
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const systemPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+  const response =
+    AI_API_STYLE === "chat_completions"
+      ? await callChatCompletions({ systemPrompt, customerText })
+      : await callResponses({ systemPrompt, customerText });
+
+  if (!response.ok) {
+    return fallback;
+  }
+
+  const data = await response.json();
+  const text =
+    AI_API_STYLE === "chat_completions"
+      ? data.choices?.[0]?.message?.content || fallback
+      : data.output_text ||
+        data.output?.flatMap((item) => item.content || [])
+          .map((item) => item.text || "")
+          .join("") ||
+        fallback;
+
+  return text.slice(0, MAX_REPLY_CHARS);
+}
+
+function callResponses({ systemPrompt, customerText }) {
+  return fetch(`${AI_BASE_URL}/responses`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${AI_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+      model: AI_MODEL,
       input: [
         {
           role: "system",
-          content: process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT,
+          content: systemPrompt,
         },
         {
           role: "user",
@@ -97,20 +125,30 @@ async function generateAiReply(customerText) {
       ],
     }),
   });
+}
 
-  if (!response.ok) {
-    return fallback;
-  }
-
-  const data = await response.json();
-  const text =
-    data.output_text ||
-    data.output?.flatMap((item) => item.content || [])
-      .map((item) => item.text || "")
-      .join("") ||
-    fallback;
-
-  return text.slice(0, MAX_REPLY_CHARS);
+function callChatCompletions({ systemPrompt, customerText }) {
+  return fetch(`${AI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${AI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: AI_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: systemPrompt,
+        },
+        {
+          role: "user",
+          content: customerText,
+        },
+      ],
+      temperature: 0.4,
+    }),
+  });
 }
 
 async function handleWechatCallback(req, res) {
