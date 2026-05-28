@@ -3,6 +3,9 @@ const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || 8787);
 const WECHAT_TOKEN = process.env.WECHAT_TOKEN || "dev-token";
+const WECHAT_CORP_ID = process.env.WECHAT_CORP_ID || process.env.WECOM_CORP_ID || "";
+const WECHAT_ENCODING_AES_KEY =
+  process.env.WECHAT_ENCODING_AES_KEY || process.env.WECOM_ENCODING_AES_KEY || "";
 const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 180);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
 const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -25,6 +28,15 @@ function verifyWechatSignature(query) {
   const raw = [WECHAT_TOKEN, timestamp, nonce].sort().join("");
   const digest = crypto.createHash("sha1").update(raw).digest("hex");
   return digest === signature;
+}
+
+function sha1Signature(...parts) {
+  return crypto.createHash("sha1").update(parts.sort().join("")).digest("hex");
+}
+
+function verifyWechatEncryptedSignature({ msgSignature, timestamp, nonce, encrypted }) {
+  if (!msgSignature || !timestamp || !nonce || !encrypted) return false;
+  return sha1Signature(WECHAT_TOKEN, timestamp, nonce, encrypted) === msgSignature;
 }
 
 function parseQuery(url) {
@@ -52,6 +64,75 @@ async function readJson(req) {
 function extractXmlValue(xml, tag) {
   const match = xml.match(new RegExp(`<${tag}><!\\[CDATA\\[([\\s\\S]*?)\\]\\]></${tag}>|<${tag}>([\\s\\S]*?)</${tag}>`));
   return match ? match[1] || match[2] || "" : "";
+}
+
+function getWechatAesKey() {
+  if (!WECHAT_ENCODING_AES_KEY || WECHAT_ENCODING_AES_KEY.length !== 43) {
+    throw new Error("WECHAT_ENCODING_AES_KEY must be 43 characters");
+  }
+
+  return Buffer.from(`${WECHAT_ENCODING_AES_KEY}=`, "base64");
+}
+
+function pkcs7Unpad(buffer) {
+  const pad = buffer[buffer.length - 1];
+  if (pad < 1 || pad > 32) return buffer;
+  return buffer.subarray(0, buffer.length - pad);
+}
+
+function pkcs7Pad(buffer) {
+  const blockSize = 32;
+  const pad = blockSize - (buffer.length % blockSize || blockSize);
+  return Buffer.concat([buffer, Buffer.alloc(pad, pad)]);
+}
+
+function decryptWechatPayload(encrypted) {
+  const aesKey = getWechatAesKey();
+  const decipher = crypto.createDecipheriv("aes-256-cbc", aesKey, aesKey.subarray(0, 16));
+  decipher.setAutoPadding(false);
+
+  const decrypted = pkcs7Unpad(
+    Buffer.concat([decipher.update(encrypted, "base64"), decipher.final()])
+  );
+  const messageLength = decrypted.readUInt32BE(16);
+  const message = decrypted.subarray(20, 20 + messageLength).toString("utf8");
+  const receiveId = decrypted.subarray(20 + messageLength).toString("utf8");
+
+  if (WECHAT_CORP_ID && receiveId && receiveId !== WECHAT_CORP_ID) {
+    throw new Error("WeCom receive id mismatch");
+  }
+
+  return message;
+}
+
+function encryptWechatPayload(message) {
+  const aesKey = getWechatAesKey();
+  const messageBuffer = Buffer.from(message);
+  const lengthBuffer = Buffer.alloc(4);
+  lengthBuffer.writeUInt32BE(messageBuffer.length, 0);
+
+  const random = crypto.randomBytes(16);
+  const receiveId = Buffer.from(WECHAT_CORP_ID);
+  const plaintext = pkcs7Pad(Buffer.concat([random, lengthBuffer, messageBuffer, receiveId]));
+  const cipher = crypto.createCipheriv("aes-256-cbc", aesKey, aesKey.subarray(0, 16));
+  cipher.setAutoPadding(false);
+
+  return Buffer.concat([cipher.update(plaintext), cipher.final()]).toString("base64");
+}
+
+function buildEncryptedXml({ plainXml, nonce }) {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const encrypted = encryptWechatPayload(plainXml);
+  const signature = sha1Signature(WECHAT_TOKEN, timestamp, nonce, encrypted);
+
+  return [
+    "<xml>",
+    `<Encrypt><![CDATA[${encrypted}]]></Encrypt>`,
+    `<MsgSignature><![CDATA[${signature}]]></MsgSignature>`,
+    `<TimeStamp>${timestamp}</TimeStamp>`,
+    `<Nonce><![CDATA[${nonce}]]></Nonce>`,
+    "</xml>",
+  ].join("");
 }
 
 function buildTextXml({ toUser, fromUser, content }) {
@@ -173,6 +254,26 @@ async function handleWechatCallback(req, res) {
   const query = parseQuery(req.url);
 
   if (req.method === "GET") {
+    if (query.msg_signature && query.echostr) {
+      const valid = verifyWechatEncryptedSignature({
+        msgSignature: query.msg_signature,
+        timestamp: query.timestamp,
+        nonce: query.nonce,
+        encrypted: query.echostr,
+      });
+
+      if (!valid) {
+        res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("invalid msg_signature");
+        return;
+      }
+
+      const echo = decryptWechatPayload(query.echostr);
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end(echo);
+      return;
+    }
+
     const valid = verifyWechatSignature(query);
     res.writeHead(valid ? 200 : 403, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(valid ? query.echostr || "" : "invalid signature");
@@ -180,17 +281,39 @@ async function handleWechatCallback(req, res) {
   }
 
   if (req.method === "POST") {
-    const valid = verifyWechatSignature(query);
+    const body = await readBody(req);
+    const encrypted = extractXmlValue(body, "Encrypt");
+    let messageXml = body;
+    let encryptedReply = false;
+
+    if (query.msg_signature && encrypted) {
+      const validEncrypted = verifyWechatEncryptedSignature({
+        msgSignature: query.msg_signature,
+        timestamp: query.timestamp,
+        nonce: query.nonce,
+        encrypted,
+      });
+
+      if (!validEncrypted && process.env.NODE_ENV === "production") {
+        res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("invalid msg_signature");
+        return;
+      }
+
+      messageXml = decryptWechatPayload(encrypted);
+      encryptedReply = true;
+    }
+
+    const valid = encryptedReply || verifyWechatSignature(query);
     if (!valid && process.env.NODE_ENV === "production") {
       res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
       res.end("invalid signature");
       return;
     }
 
-    const body = await readBody(req);
-    const fromUser = extractXmlValue(body, "FromUserName");
-    const toUser = extractXmlValue(body, "ToUserName");
-    const content = extractXmlValue(body, "Content");
+    const fromUser = extractXmlValue(messageXml, "FromUserName");
+    const toUser = extractXmlValue(messageXml, "ToUserName");
+    const content = extractXmlValue(messageXml, "Content");
 
     const reply = await generateAiReply(content);
     const xml = buildTextXml({
@@ -200,7 +323,7 @@ async function handleWechatCallback(req, res) {
     });
 
     res.writeHead(200, { "Content-Type": "application/xml; charset=utf-8" });
-    res.end(xml);
+    res.end(encryptedReply ? buildEncryptedXml({ plainXml: xml, nonce: query.nonce || "nonce" }) : xml);
     return;
   }
 
