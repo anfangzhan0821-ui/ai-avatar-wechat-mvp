@@ -10,11 +10,13 @@ services:
       - key: NODE_ENV
         value: production
       - key: AI_MODEL
-        value: deepseek-v4-flash
+        value: deepseek-chat
       - key: AI_BASE_URL
         value: https://api.deepseek.com
       - key: AI_API_STYLE
         value: chat_completions
+      - key: AI_TIMEOUT_MS
+        value: "25000"
       - key: MAX_REPLY_CHARS
         value: "180"
       - key: HUMAN_HANDOFF_KEYWORDS
