@@ -8,6 +8,7 @@ const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
 const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const AI_MODEL = process.env.AI_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const AI_API_STYLE = process.env.AI_API_STYLE || "responses";
+const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 25000);
 const DEFAULT_SYSTEM_PROMPT =
   "你是微信里的 AI 客服助手。回复要简洁、自然、中文口语化。不确定就说需要本人确认。涉及付款、合同、退款、投诉、法律、医疗、投资、最终价格、折扣时必须转人工。";
 
@@ -82,12 +83,20 @@ async function generateAiReply(customerText) {
   }
 
   const systemPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
-  const response =
-    AI_API_STYLE === "chat_completions"
-      ? await callChatCompletions({ systemPrompt, customerText })
-      : await callResponses({ systemPrompt, customerText });
+  let response;
+
+  try {
+    response =
+      AI_API_STYLE === "chat_completions"
+        ? await callChatCompletions({ systemPrompt, customerText })
+        : await callResponses({ systemPrompt, customerText });
+  } catch (error) {
+    console.error("AI request failed", error.message);
+    return fallback;
+  }
 
   if (!response.ok) {
+    console.error("AI provider returned error", response.status, await response.text());
     return fallback;
   }
 
@@ -105,8 +114,12 @@ async function generateAiReply(customerText) {
 }
 
 function callResponses({ systemPrompt, customerText }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
   return fetch(`${AI_BASE_URL}/responses`, {
     method: "POST",
+    signal: controller.signal,
     headers: {
       Authorization: `Bearer ${AI_API_KEY}`,
       "Content-Type": "application/json",
@@ -124,12 +137,16 @@ function callResponses({ systemPrompt, customerText }) {
         },
       ],
     }),
-  });
+  }).finally(() => clearTimeout(timeout));
 }
 
 function callChatCompletions({ systemPrompt, customerText }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
   return fetch(`${AI_BASE_URL}/chat/completions`, {
     method: "POST",
+    signal: controller.signal,
     headers: {
       Authorization: `Bearer ${AI_API_KEY}`,
       "Content-Type": "application/json",
@@ -147,8 +164,9 @@ function callChatCompletions({ systemPrompt, customerText }) {
         },
       ],
       temperature: 0.4,
+      max_tokens: 300,
     }),
-  });
+  }).finally(() => clearTimeout(timeout));
 }
 
 async function handleWechatCallback(req, res) {
