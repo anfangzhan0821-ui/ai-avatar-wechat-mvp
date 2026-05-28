@@ -22,7 +22,11 @@ services:
       - key: HUMAN_HANDOFF_KEYWORDS
         value: 付款,合同,退款,投诉,能便宜吗,转人工,本人,老板
       - key: WECHAT_TOKEN
-        generateValue: true
+        sync: false
+      - key: WECHAT_CORP_ID
+        sync: false
+      - key: WECHAT_ENCODING_AES_KEY
+        sync: false
       - key: AI_API_KEY
         sync: false
       - key: AVATAR_SYSTEM_PROMPT

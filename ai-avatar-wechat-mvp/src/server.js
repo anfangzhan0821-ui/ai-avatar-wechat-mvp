@@ -82,7 +82,8 @@ function pkcs7Unpad(buffer) {
 
 function pkcs7Pad(buffer) {
   const blockSize = 32;
-  const pad = blockSize - (buffer.length % blockSize || blockSize);
+  const remainder = buffer.length % blockSize;
+  const pad = remainder === 0 ? blockSize : blockSize - remainder;
   return Buffer.concat([buffer, Buffer.alloc(pad, pad)]);
 }
 
