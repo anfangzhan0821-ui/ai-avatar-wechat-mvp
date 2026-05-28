@@ -3,9 +3,6 @@ const crypto = require("crypto");
 
 const PORT = Number(process.env.PORT || 8787);
 const WECHAT_TOKEN = process.env.WECHAT_TOKEN || "dev-token";
-const WECHAT_CORP_ID = process.env.WECHAT_CORP_ID || process.env.WECOM_CORP_ID || "";
-const WECHAT_ENCODING_AES_KEY =
-  process.env.WECHAT_ENCODING_AES_KEY || process.env.WECOM_ENCODING_AES_KEY || "";
 const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 180);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
 const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -28,15 +25,6 @@ function verifyWechatSignature(query) {
   const raw = [WECHAT_TOKEN, timestamp, nonce].sort().join("");
   const digest = crypto.createHash("sha1").update(raw).digest("hex");
   return digest === signature;
-}
-
-function sha1Signature(...parts) {
-  return crypto.createHash("sha1").update(parts.sort().join("")).digest("hex");
-}
-
-function verifyWechatEncryptedSignature({ msgSignature, timestamp, nonce, encrypted }) {
-  if (!msgSignature || !timestamp || !nonce || !encrypted) return false;
-  return sha1Signature(WECHAT_TOKEN, timestamp, nonce, encrypted) === msgSignature;
 }
 
 function parseQuery(url) {
@@ -66,34 +54,210 @@ function extractXmlValue(xml, tag) {
   return match ? match[1] || match[2] || "" : "";
 }
 
-function getWechatAesKey() {
-  if (!WECHAT_ENCODING_AES_KEY || WECHAT_ENCODING_AES_KEY.length !== 43) {
-    throw new Error("WECHAT_ENCODING_AES_KEY must be 43 characters");
+function buildTextXml({ toUser, fromUser, content }) {
+  const now = Math.floor(Date.now() / 1000);
+  return [
+    "<xml>",
+    `<ToUserName><![CDATA[${toUser}]]></ToUserName>`,
+    `<FromUserName><![CDATA[${fromUser}]]></FromUserName>`,
+    `<CreateTime>${now}</CreateTime>`,
+    "<MsgType><![CDATA[text]]></MsgType>",
+    `<Content><![CDATA[${content}]]></Content>`,
+    "</xml>",
+  ].join("");
+}
+
+function needsHumanHandoff(text) {
+  return handoffKeywords.some((keyword) => text.includes(keyword));
+}
+
+async function generateAiReply(customerText) {
+  if (needsHumanHandoff(customerText)) {
+    return "这个问题需要本人或团队确认后再回复你，避免我说得不准确。我先帮你记录下来。";
   }
 
-  return Buffer.from(`${WECHAT_ENCODING_AES_KEY}=`, "base64");
+  const fallback = "你好，我是 AI 助手，可以先帮你解答常见问题。你可以简单说下你的需求、预算和希望解决的问题。";
+
+  if (!AI_API_KEY) {
+    return fallback;
+  }
+
+  const systemPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+  let response;
+
+  try {
+    response =
+      AI_API_STYLE === "chat_completions"
+        ? await callChatCompletions({ systemPrompt, customerText })
+        : await callResponses({ systemPrompt, customerText });
+  } catch (error) {
+    console.error("AI request failed", error.message);
+    return fallback;
+  }
+
+  if (!response.ok) {
+    console.error("AI provider returned error", response.status, await response.text());
+    return fallback;
+  }
+
+  const data = await response.json();
+  const text =
+    AI_API_STYLE === "chat_completions"
+      ? data.choices?.[0]?.message?.content || fallback
+      : data.output_text ||
+        data.output?.flatMap((item) => item.content || [])
+          .map((item) => item.text || "")
+          .join("") ||
+        fallback;
+
+  return text.slice(0, MAX_REPLY_CHARS);
 }
 
-function pkcs7Unpad(buffer) {
-  const pad = buffer[buffer.length - 1];
-  if (pad < 1 || pad > 32) return buffer;
-  return buffer.subarray(0, buffer.length - pad);
+function callResponses({ systemPrompt, customerText }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
+  return fetch(`${AI_BASE_URL}/responses`, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      Authorization: `Bearer ${AI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: AI_MODEL,
+      input: [
+        {
+          role: "system",
+          content: systemPrompt,
+        },
+        {
+          role: "user",
+          content: customerText,
+        },
+      ],
+    }),
+  }).finally(() => clearTimeout(timeout));
 }
 
-function pkcs7Pad(buffer) {
-  const blockSize = 32;
-  const pad = blockSize - (buffer.length % blockSize || blockSize);
-  return Buffer.concat([buffer, Buffer.alloc(pad, pad)]);
+function callChatCompletions({ systemPrompt, customerText }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
+  return fetch(`${AI_BASE_URL}/chat/completions`, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      Authorization: `Bearer ${AI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: AI_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: systemPrompt,
+        },
+        {
+          role: "user",
+          content: customerText,
+        },
+      ],
+      temperature: 0.4,
+      max_tokens: 300,
+    }),
+  }).finally(() => clearTimeout(timeout));
 }
 
-function decryptWechatPayload(encrypted) {
-  const aesKey = getWechatAesKey();
-  const decipher = crypto.createDecipheriv("aes-256-cbc", aesKey, aesKey.subarray(0, 16));
-  decipher.setAutoPadding(false);
+async function handleWechatCallback(req, res) {
+  const query = parseQuery(req.url);
 
-  const decrypted = pkcs7Unpad(
-    Buffer.concat([decipher.update(encrypted, "base64"), decipher.final()])
-  );
-  const messageLength = decrypted.readUInt32BE(16);
-  const message = decrypted.subarray(20, 20 + messageLength).toString("utf8");
-  const receiveId = decrypted.subarray(20 + messageLength).toString("utf8");
+  if (req.method === "GET") {
+    const valid = verifyWechatSignature(query);
+    res.writeHead(valid ? 200 : 403, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end(valid ? query.echostr || "" : "invalid signature");
+    return;
+  }
+
+  if (req.method === "POST") {
+    const valid = verifyWechatSignature(query);
+    if (!valid && process.env.NODE_ENV === "production") {
+      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("invalid signature");
+      return;
+    }
+
+    const body = await readBody(req);
+    const fromUser = extractXmlValue(body, "FromUserName");
+    const toUser = extractXmlValue(body, "ToUserName");
+    const content = extractXmlValue(body, "Content");
+
+    const reply = await generateAiReply(content);
+    const xml = buildTextXml({
+      toUser: fromUser,
+      fromUser: toUser,
+      content: reply,
+    });
+
+    res.writeHead(200, { "Content-Type": "application/xml; charset=utf-8" });
+    res.end(xml);
+    return;
+  }
+
+  res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("method not allowed");
+}
+
+async function handleTestChat(req, res) {
+  if (req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "method not allowed" }));
+    return;
+  }
+
+  const body = await readJson(req);
+  const message = String(body.message || "").trim();
+
+  if (!message) {
+    res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "message is required" }));
+    return;
+  }
+
+  const reply = await generateAiReply(message);
+  res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ reply }));
+}
+
+async function handleRequest(req, res) {
+  if (req.url.startsWith("/wechat/callback")) {
+    await handleWechatCallback(req, res);
+    return;
+  }
+
+  if (req.url.startsWith("/test-chat")) {
+    await handleTestChat(req, res);
+    return;
+  }
+
+  if (req.url.startsWith("/health")) {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("not found");
+}
+
+const server = http.createServer((req, res) => {
+  handleRequest(req, res).catch((error) => {
+    console.error(error);
+    res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("internal server error");
+  });
+});
+
+server.listen(PORT, () => {
+  console.log(`AI avatar webhook listening on http://localhost:${PORT}`);
+});
