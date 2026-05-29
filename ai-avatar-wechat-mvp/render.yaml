@@ -18,7 +18,7 @@ services:
       - key: AI_TIMEOUT_MS
         value: "25000"
       - key: MAX_REPLY_CHARS
-        value: "700"
+        value: "220"
       - key: KNOWLEDGE_MAX_CHARS
         value: "32000"
       - key: HUMAN_HANDOFF_KEYWORDS

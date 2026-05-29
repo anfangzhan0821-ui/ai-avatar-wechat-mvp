@@ -8,7 +8,7 @@ const WECHAT_TOKEN = process.env.WECHAT_TOKEN || "dev-token";
 const WECHAT_CORP_ID = process.env.WECHAT_CORP_ID || process.env.WECOM_CORP_ID || "";
 const WECHAT_ENCODING_AES_KEY =
   process.env.WECHAT_ENCODING_AES_KEY || process.env.WECOM_ENCODING_AES_KEY || "";
-const MAX_REPLY_CHARS = Math.max(Number(process.env.MAX_REPLY_CHARS || 700), 700);
+const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 220);
 const KNOWLEDGE_MAX_CHARS = Number(process.env.KNOWLEDGE_MAX_CHARS || 32000);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
 const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -21,10 +21,12 @@ const KNOWLEDGE_PATH = path.join(__dirname, "..", "knowledge", "jiarui-brand-ava
 const AVATAR_STYLE_PROMPT = [
   "你必须像一个正常人在微信里说话，不要像客服机器人。",
   "身份：你是毛豆本人风格的智能分身。不要自称 AI、机器人、助手，也不要说“根据资料库”。",
-  "语气：专业但不端着，口语、松弛、有观点；可以说“说实话”“简单讲”“这个要看情况”。",
-  "回复长度：多数情况下 1-4 句，复杂问题最多 2-3 个短段落。不要一上来写长篇说明。",
-  "互动方式：先接住对方的话，再给判断；如果信息不够，最后自然追问一个关键问题。",
-  "格式：少用项目符号和编号，除非客户明确问流程、报价、清单。不要使用 Markdown 标题。",
+  "语气：专业但不端着，口语、松弛、有观点；像朋友微信聊天，不像销售话术。",
+  "回复长度：默认 1-2 句，最多 120 个中文字符。客户没有明确要求展开时，不要解释完整。",
+  "互动方式：先短答，再只追问一个关键问题。不要一次问多个问题。",
+  "格式：不要项目符号、编号、Markdown 标题、加粗。尽量一小段说完。",
+  "节奏：客户问一句，你回一句半。把资料库当背景，不要把资料一次性倒出来。",
+  "报价：客户问价格/收费时，不要直接给完整价格表；只说要看项目范围，然后问一个最关键的问题。",
   "真实感：不要编造“最近正在做”的具体项目、客户或时间状态；资料库里的案例只能作为服务经验和案例来讲。",
   "边界：涉及最终报价、合同、付款、退款、投诉、法律风险、重大承诺时，不要直接拍板，要说需要本人/团队确认。",
 ].join("\n");
@@ -41,7 +43,7 @@ function loadAvatarKnowledge() {
 const avatarKnowledge = loadAvatarKnowledge();
 
 const handoffKeywords = (process.env.HUMAN_HANDOFF_KEYWORDS ||
-  "付款,合同,退款,投诉,能便宜吗,转人工,本人,老板")
+  "付款,合同,退款,投诉,能便宜吗,转人工,本人,老板,报价单,最终报价")
   .split(",")
   .map((item) => item.trim())
   .filter(Boolean);
@@ -182,6 +184,34 @@ function isRecentCasualQuestion(text) {
   return /最近|这几天|近来/.test(text) && /忙|有意思|干嘛|做什么|在做/.test(text);
 }
 
+function isGreeting(text) {
+  return /^(你好|您好|哈喽|hello|hi|嗨|在吗|在不在)[啊呀呐呢\s！!。,.，]*$/i.test(text.trim());
+}
+
+function isPricingQuestion(text) {
+  return /多少钱|怎么收费|收费|价格|报价|费用|预算/.test(text);
+}
+
+function directShortReply(text) {
+  if (/画册/.test(text) && /做吗|能做|可以做|有没有|吗|？|\?/.test(text)) {
+    return "做啊，画册算我们常接的项目。\n\n你们是产品画册，还是企业介绍册？";
+  }
+
+  if (/(VI|vi|视觉识别|品牌视觉)/.test(text) && /做吗|能做|可以做|有没有|吗|？|\?/.test(text)) {
+    return "做的。\n\n不过 VI 不是只画个标，得看你主要用在线上、包装，还是门店物料上。你是哪种场景？";
+  }
+
+  if (/包装/.test(text) && /做吗|能做|可以做|有没有|吗|？|\?/.test(text)) {
+    return "包装也做。\n\n你是已有产品想升级，还是新产品从零开始？";
+  }
+
+  if (/品牌银弹/.test(text)) {
+    return "简单讲，就是把产品里真正值钱的点挖出来，再用设计让客户一眼看懂。\n\n你想套到你们自己的产品上看看吗？";
+  }
+
+  return "";
+}
+
 function buildSystemPrompt() {
   const extraPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
   return [
@@ -199,7 +229,7 @@ function buildSystemPrompt() {
 }
 
 function cleanReply(text) {
-  return String(text || "")
+  let cleaned = String(text || "")
     .replace(/\r/g, "")
     .replace(/\*\*/g, "")
     .replace(/^#{1,6}\s*/gm, "")
@@ -207,6 +237,10 @@ function cleanReply(text) {
     .replace(/^(毛豆[:：]\s*)/i, "")
     .trim()
     .slice(0, MAX_REPLY_CHARS);
+  if (!/[。！？!?]$/.test(cleaned)) {
+    cleaned = cleaned.replace(/[，,、；;：:][^，,、；;：:。！？!?]*$/, "");
+  }
+  return cleaned;
 }
 
 async function generateAiReply(customerText) {
@@ -215,10 +249,23 @@ async function generateAiReply(customerText) {
   }
 
   if (isRecentCasualQuestion(customerText)) {
-    return "最近主要还是在琢磨品牌这件事。\n\n有时候会觉得，很多企业不是产品不行，是好东西没被看见。设计要做的事，就是把那些藏在产品、技术、团队里的价值，翻译成别人一眼能懂的东西。\n\n你呢，最近在忙什么有意思的事？";
+    return "最近主要还是在琢磨品牌这件事。\n\n很多企业不是东西不行，是好东西没被看见。你呢，最近在忙什么有意思的事？";
   }
 
-  const fallback = "你好，我是毛豆。\n\n你可以先简单说下你想解决什么问题，是品牌升级、包装、画册，还是展厅/网站这类？";
+  if (isGreeting(customerText)) {
+    return "嗨，你好呀，我是毛豆。\n\n你是想聊品牌视觉，还是先随便问问？";
+  }
+
+  if (isPricingQuestion(customerText)) {
+    return "这个要看项目范围，不能一口价乱报。\n\n你是想做画册、VI，还是整套品牌升级？";
+  }
+
+  const shortReply = directShortReply(customerText);
+  if (shortReply) {
+    return shortReply;
+  }
+
+  const fallback = "可以聊。\n\n你先说下你现在最想解决的问题，我听听看。";
 
   if (!AI_API_KEY) {
     return fallback;
@@ -306,7 +353,7 @@ function callChatCompletions({ systemPrompt, customerText }) {
         },
       ],
       temperature: 0.4,
-      max_tokens: 650,
+      max_tokens: 160,
     }),
   }).finally(() => clearTimeout(timeout));
 }
