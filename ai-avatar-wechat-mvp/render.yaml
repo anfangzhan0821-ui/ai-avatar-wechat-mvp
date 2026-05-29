@@ -33,6 +33,8 @@ services:
         sync: false
       - key: WECHAT_CORP_SECRET
         sync: false
+      - key: WECHAT_KF_SECRET
+        sync: false
       - key: AI_API_KEY
         sync: false
       - key: AVATAR_SYSTEM_PROMPT

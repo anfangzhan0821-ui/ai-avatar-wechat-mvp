@@ -10,6 +10,8 @@ const WECHAT_ENCODING_AES_KEY =
   process.env.WECHAT_ENCODING_AES_KEY || process.env.WECOM_ENCODING_AES_KEY || "";
 const WECHAT_AGENT_ID = process.env.WECHAT_AGENT_ID || process.env.WECOM_AGENT_ID || "";
 const WECHAT_CORP_SECRET = process.env.WECHAT_CORP_SECRET || process.env.WECOM_CORP_SECRET || "";
+const WECHAT_KF_SECRET =
+  process.env.WECHAT_KF_SECRET || process.env.WECOM_KF_SECRET || WECHAT_CORP_SECRET;
 const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 220);
 const KNOWLEDGE_MAX_CHARS = Number(process.env.KNOWLEDGE_MAX_CHARS || 32000);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
@@ -45,6 +47,10 @@ function loadAvatarKnowledge() {
 const avatarKnowledge = loadAvatarKnowledge();
 let wechatAccessToken = "";
 let wechatAccessTokenExpiresAt = 0;
+let wechatKfAccessToken = "";
+let wechatKfAccessTokenExpiresAt = 0;
+const kfCursors = new Map();
+const handledKfMsgIds = new Set();
 
 const handoffKeywords = (process.env.HUMAN_HANDOFF_KEYWORDS ||
   "付款,合同,退款,投诉,能便宜吗,转人工,本人,老板,报价单,最终报价")
@@ -247,6 +253,124 @@ function sendRemainingReplyParts({ toUser, parts }) {
       });
     }, 900 * (index + 1));
   });
+}
+
+function canSendWechatKfMessage() {
+  return Boolean(WECHAT_CORP_ID && WECHAT_KF_SECRET);
+}
+
+async function getWechatKfAccessToken() {
+  if (wechatKfAccessToken && Date.now() < wechatKfAccessTokenExpiresAt) {
+    return wechatKfAccessToken;
+  }
+
+  const url = new URL("https://qyapi.weixin.qq.com/cgi-bin/gettoken");
+  url.searchParams.set("corpid", WECHAT_CORP_ID);
+  url.searchParams.set("corpsecret", WECHAT_KF_SECRET);
+
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.errcode !== 0 || !data.access_token) {
+    throw new Error(`WeCom KF gettoken failed: ${data.errcode} ${data.errmsg || ""}`);
+  }
+
+  wechatKfAccessToken = data.access_token;
+  wechatKfAccessTokenExpiresAt = Date.now() + Math.max((data.expires_in || 7200) - 300, 60) * 1000;
+  return wechatKfAccessToken;
+}
+
+async function syncWechatKfMessages({ token, openKfid }) {
+  if (!canSendWechatKfMessage() || !token) return [];
+
+  const accessToken = await getWechatKfAccessToken();
+  const cursorKey = openKfid || "default";
+  const body = {
+    token,
+    limit: 100,
+    voice_format: 0,
+  };
+  if (openKfid) body.open_kfid = openKfid;
+  if (kfCursors.has(cursorKey)) body.cursor = kfCursors.get(cursorKey);
+
+  const response = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=${accessToken}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeCom KF sync_msg failed: ${data.errcode} ${data.errmsg || ""}`);
+  }
+  if (data.next_cursor) {
+    kfCursors.set(cursorKey, data.next_cursor);
+  }
+
+  return data.msg_list || [];
+}
+
+async function sendWechatKfText({ externalUserId, openKfid, content }) {
+  if (!canSendWechatKfMessage() || !externalUserId || !openKfid || !content) return;
+
+  const accessToken = await getWechatKfAccessToken();
+  const response = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/kf/send_msg?access_token=${accessToken}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      touser: externalUserId,
+      open_kfid: openKfid,
+      msgid: crypto.randomBytes(16).toString("hex"),
+      msgtype: "text",
+      text: {
+        content,
+      },
+    }),
+  });
+  const data = await response.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeCom KF send_msg failed: ${data.errcode} ${data.errmsg || ""}`);
+  }
+}
+
+function rememberKfMsgId(msgid) {
+  if (!msgid) return false;
+  if (handledKfMsgIds.has(msgid)) return true;
+  handledKfMsgIds.add(msgid);
+  if (handledKfMsgIds.size > 500) {
+    const first = handledKfMsgIds.values().next().value;
+    handledKfMsgIds.delete(first);
+  }
+  return false;
+}
+
+async function replyToWechatKfMessage(message) {
+  if (message.origin !== 3 || message.msgtype !== "text" || !message.text?.content) return;
+  if (rememberKfMsgId(message.msgid)) return;
+
+  const reply = await generateAiReply(message.text.content);
+  const parts = splitReply(reply);
+  for (const [index, part] of parts.entries()) {
+    if (index > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+    }
+    await sendWechatKfText({
+      externalUserId: message.external_userid,
+      openKfid: message.open_kfid,
+      content: part,
+    });
+  }
+}
+
+async function handleWechatKfEvent(messageXml) {
+  const token = extractXmlValue(messageXml, "Token");
+  const openKfid = extractXmlValue(messageXml, "OpenKfId");
+  const messages = await syncWechatKfMessages({ token, openKfid });
+  for (const message of messages) {
+    await replyToWechatKfMessage(message);
+  }
 }
 
 function needsHumanHandoff(text) {
@@ -499,6 +623,16 @@ async function handleWechatCallback(req, res) {
     const fromUser = extractXmlValue(messageXml, "FromUserName");
     const toUser = extractXmlValue(messageXml, "ToUserName");
     const content = extractXmlValue(messageXml, "Content");
+    const event = extractXmlValue(messageXml, "Event");
+
+    if (event === "kf_msg_or_event") {
+      handleWechatKfEvent(messageXml).catch((error) => {
+        console.error("WeCom KF event failed", error.message);
+      });
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+      res.end("success");
+      return;
+    }
 
     const reply = await generateAiReply(content);
     const replyParts = splitReply(reply);
