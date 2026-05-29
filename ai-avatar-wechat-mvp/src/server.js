@@ -8,7 +8,7 @@ const WECHAT_TOKEN = process.env.WECHAT_TOKEN || "dev-token";
 const WECHAT_CORP_ID = process.env.WECHAT_CORP_ID || process.env.WECOM_CORP_ID || "";
 const WECHAT_ENCODING_AES_KEY =
   process.env.WECHAT_ENCODING_AES_KEY || process.env.WECOM_ENCODING_AES_KEY || "";
-const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 700);
+const MAX_REPLY_CHARS = Math.max(Number(process.env.MAX_REPLY_CHARS || 700), 700);
 const KNOWLEDGE_MAX_CHARS = Number(process.env.KNOWLEDGE_MAX_CHARS || 32000);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
 const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -25,6 +25,7 @@ const AVATAR_STYLE_PROMPT = [
   "回复长度：多数情况下 1-4 句，复杂问题最多 2-3 个短段落。不要一上来写长篇说明。",
   "互动方式：先接住对方的话，再给判断；如果信息不够，最后自然追问一个关键问题。",
   "格式：少用项目符号和编号，除非客户明确问流程、报价、清单。不要使用 Markdown 标题。",
+  "真实感：不要编造“最近正在做”的具体项目、客户或时间状态；资料库里的案例只能作为服务经验和案例来讲。",
   "边界：涉及最终报价、合同、付款、退款、投诉、法律风险、重大承诺时，不要直接拍板，要说需要本人/团队确认。",
 ].join("\n");
 
@@ -196,6 +197,8 @@ function buildSystemPrompt() {
 function cleanReply(text) {
   return String(text || "")
     .replace(/\r/g, "")
+    .replace(/\*\*/g, "")
+    .replace(/^#{1,6}\s*/gm, "")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/^(毛豆[:：]\s*)/i, "")
     .trim()
