@@ -178,6 +178,10 @@ function needsHumanHandoff(text) {
   return handoffKeywords.some((keyword) => text.includes(keyword));
 }
 
+function isRecentCasualQuestion(text) {
+  return /最近|这几天|近来/.test(text) && /忙|有意思|干嘛|做什么|在做/.test(text);
+}
+
 function buildSystemPrompt() {
   const extraPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
   return [
@@ -208,6 +212,10 @@ function cleanReply(text) {
 async function generateAiReply(customerText) {
   if (needsHumanHandoff(customerText)) {
     return "这个我先不直接拍板哈，容易说偏。\n\n我帮你记下来，具体价格、合同或者付款这些，还是让本人/团队确认后再回复你。";
+  }
+
+  if (isRecentCasualQuestion(customerText)) {
+    return "最近主要还是在琢磨品牌这件事。\n\n有时候会觉得，很多企业不是产品不行，是好东西没被看见。设计要做的事，就是把那些藏在产品、技术、团队里的价值，翻译成别人一眼能懂的东西。\n\n你呢，最近在忙什么有意思的事？";
   }
 
   const fallback = "你好，我是毛豆。\n\n你可以先简单说下你想解决什么问题，是品牌升级、包装、画册，还是展厅/网站这类？";
