@@ -12,7 +12,7 @@ const WECHAT_AGENT_ID = process.env.WECHAT_AGENT_ID || process.env.WECOM_AGENT_I
 const WECHAT_CORP_SECRET = process.env.WECHAT_CORP_SECRET || process.env.WECOM_CORP_SECRET || "";
 const WECHAT_KF_SECRET =
   process.env.WECHAT_KF_SECRET || process.env.WECOM_KF_SECRET || WECHAT_CORP_SECRET;
-const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 220);
+const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 120);
 const KNOWLEDGE_MAX_CHARS = Number(process.env.KNOWLEDGE_MAX_CHARS || 32000);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
 const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
@@ -26,10 +26,12 @@ const AVATAR_STYLE_PROMPT = [
   "你必须像一个正常人在微信里说话，不要像客服机器人。",
   "身份：你是毛豆本人风格的智能分身。不要自称 AI、机器人、助手，也不要说“根据资料库”。",
   "语气：专业但不端着，口语、松弛、有观点；像朋友微信聊天，不像销售话术。",
-  "回复长度：默认 1-2 句，最多 120 个中文字符。客户没有明确要求展开时，不要解释完整。",
-  "互动方式：先短答，再只追问一个关键问题。不要一次问多个问题。",
+  "回复长度：默认 1-2 句，最多 80 个中文字符。能用短句就不要用长句。",
+  "互动方式：先短答，再只追问一个关键问题。不要一次问多个问题；客户没说清楚时，用反问确认。",
   "格式：不要项目符号、编号、Markdown 标题、加粗。尽量一小段说完。",
   "节奏：客户问一句，你回一句半。把资料库当背景，不要把资料一次性倒出来。",
+  "真人感：不要说“先问一句”“我来帮你分析”“根据你的需求”“这样好定设计风格”这类模板话。",
+  "禁止主动消息：只能回复客户刚发来的消息。不要催客户回复，不要说“还在吗”“刚谈完吗”，不要做定期问候、节日问候或营销跟进。",
   "报价：客户问价格/收费时，不要直接给完整价格表；只说要看项目范围，然后问一个最关键的问题。",
   "真实感：不要编造“最近正在做”的具体项目、客户或时间状态；资料库里的案例只能作为服务经验和案例来讲。",
   "边界：涉及最终报价、合同、付款、退款、投诉、法律风险、重大承诺时，不要直接拍板，要说需要本人/团队确认。",
@@ -187,11 +189,11 @@ function buildTextXml({ toUser, fromUser, content }) {
 }
 
 function splitReply(reply) {
-  const parts = String(reply || "")
+  const firstPart = String(reply || "")
     .split(/\n{2,}/)
     .map((part) => part.trim())
-    .filter(Boolean);
-  return parts.length ? parts : [String(reply || "").trim()].filter(Boolean);
+    .filter(Boolean)[0];
+  return firstPart ? [firstPart] : [];
 }
 
 function canSendWechatAppMessage() {
@@ -243,16 +245,8 @@ async function sendWechatAppText({ toUser, content }) {
   }
 }
 
-function sendRemainingReplyParts({ toUser, parts }) {
-  if (!canSendWechatAppMessage() || parts.length <= 1) return;
-
-  parts.slice(1).forEach((part, index) => {
-    setTimeout(() => {
-      sendWechatAppText({ toUser, content: part }).catch((error) => {
-        console.error("WeCom active message failed", error.message);
-      });
-    }, 900 * (index + 1));
-  });
+function sendRemainingReplyParts() {
+  return;
 }
 
 function canSendWechatKfMessage() {
@@ -352,16 +346,13 @@ async function replyToWechatKfMessage(message) {
 
   const reply = await generateAiReply(message.text.content);
   const parts = splitReply(reply);
-  for (const [index, part] of parts.entries()) {
-    if (index > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 900));
-    }
-    await sendWechatKfText({
-      externalUserId: message.external_userid,
-      openKfid: message.open_kfid,
-      content: part,
-    });
-  }
+  const part = parts[0];
+  if (!part) return;
+  await sendWechatKfText({
+    externalUserId: message.external_userid,
+    openKfid: message.open_kfid,
+    content: part,
+  });
 }
 
 async function handleWechatKfEvent(messageXml) {
@@ -390,24 +381,28 @@ function isPricingQuestion(text) {
 }
 
 function directShortReply(text) {
+  if (/我要|想|准备|需要|打算/.test(text) && /画册/.test(text)) {
+    return "可以做。这个画册主要是拜访客户用，还是展会用？";
+  }
+
   if (/工业|设备|制造|工厂|机械/.test(text) && /升级|形象|品牌|视觉/.test(text)) {
-    return "工业设备这类很适合做形象升级。\n\n关键不是做得花，而是把技术感、可靠感和规模感讲清楚。你们现在主要短板是在画册、官网，还是展厅？";
+    return "工业设备很适合做形象升级。你们现在最想先改画册、官网，还是展厅？";
   }
 
   if (/画册/.test(text) && /做吗|能做|可以做|有没有|吗|？|\?/.test(text)) {
-    return "做啊，画册算我们常接的项目。\n\n你们是产品画册，还是企业介绍册？";
+    return "做啊。你们是产品画册，还是企业介绍册？";
   }
 
   if (/(VI|vi|视觉识别|品牌视觉)/.test(text) && /做吗|能做|可以做|有没有|吗|？|\?/.test(text)) {
-    return "做的。\n\n不过 VI 不是只画个标，得看你主要用在线上、包装，还是门店物料上。你是哪种场景？";
+    return "做的。你们主要用在线上、包装，还是门店物料？";
   }
 
   if (/包装/.test(text) && /做吗|能做|可以做|有没有|吗|？|\?/.test(text)) {
-    return "包装也做。\n\n你是已有产品想升级，还是新产品从零开始？";
+    return "包装也做。是老产品升级，还是新产品从零开始？";
   }
 
   if (/品牌银弹/.test(text)) {
-    return "简单讲，就是把产品里真正值钱的点挖出来，再用设计让客户一眼看懂。\n\n你想套到你们自己的产品上看看吗？";
+    return "简单讲，就是把产品里值钱的点讲清楚。你想套到你们产品上看看吗？";
   }
 
   return "";
@@ -434,6 +429,8 @@ function cleanReply(text) {
     .replace(/\r/g, "")
     .replace(/\*\*/g, "")
     .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^(先问一句[:：，,。]?\s*)/gm, "")
+    .replace(/(我来帮你分析一下|根据你的需求|这样好定设计风格)[。！？!?，,]*/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/^(毛豆[:：]\s*)/i, "")
     .trim()
@@ -446,19 +443,19 @@ function cleanReply(text) {
 
 async function generateAiReply(customerText) {
   if (needsHumanHandoff(customerText)) {
-    return "这个我先不直接拍板哈，容易说偏。\n\n我帮你记下来，具体价格、合同或者付款这些，还是让本人/团队确认后再回复你。";
+    return "这个我先不直接拍板，容易说偏。价格、合同这些让本人确认后再回你。";
   }
 
   if (isRecentCasualQuestion(customerText)) {
-    return "最近主要还是在琢磨品牌这件事。\n\n很多企业不是东西不行，是好东西没被看见。你呢，最近在忙什么有意思的事？";
+    return "最近还是在琢磨品牌这件事。你呢，最近在忙什么项目？";
   }
 
   if (isGreeting(customerText)) {
-    return "嗨，你好呀，我是毛豆。\n\n你是想聊品牌视觉，还是先随便问问？";
+    return "嗨，你好呀。你是想聊品牌视觉，还是先随便问问？";
   }
 
   if (isPricingQuestion(customerText)) {
-    return "这个要看项目范围，不能一口价乱报。\n\n你是想做画册、VI，还是整套品牌升级？";
+    return "这个要看范围，不能一口价乱报。你想先做哪一块？";
   }
 
   const shortReply = directShortReply(customerText);
@@ -466,7 +463,7 @@ async function generateAiReply(customerText) {
     return shortReply;
   }
 
-  const fallback = "可以聊。\n\n你先说下你现在最想解决的问题，我听听看。";
+  const fallback = "可以聊。你现在最想先解决什么问题？";
 
   if (!AI_API_KEY) {
     return fallback;
