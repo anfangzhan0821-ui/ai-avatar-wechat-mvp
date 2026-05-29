@@ -193,6 +193,10 @@ function isPricingQuestion(text) {
 }
 
 function directShortReply(text) {
+  if (/工业|设备|制造|工厂|机械/.test(text) && /升级|形象|品牌|视觉/.test(text)) {
+    return "工业设备这类很适合做形象升级。\n\n关键不是做得花，而是把技术感、可靠感和规模感讲清楚。你们现在主要短板是在画册、官网，还是展厅？";
+  }
+
   if (/画册/.test(text) && /做吗|能做|可以做|有没有|吗|？|\?/.test(text)) {
     return "做啊，画册算我们常接的项目。\n\n你们是产品画册，还是企业介绍册？";
   }
