@@ -29,6 +29,10 @@ services:
         sync: false
       - key: WECHAT_ENCODING_AES_KEY
         sync: false
+      - key: WECHAT_AGENT_ID
+        sync: false
+      - key: WECHAT_CORP_SECRET
+        sync: false
       - key: AI_API_KEY
         sync: false
       - key: AVATAR_SYSTEM_PROMPT

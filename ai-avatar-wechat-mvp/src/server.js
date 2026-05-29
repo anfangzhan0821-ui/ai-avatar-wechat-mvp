@@ -8,6 +8,8 @@ const WECHAT_TOKEN = process.env.WECHAT_TOKEN || "dev-token";
 const WECHAT_CORP_ID = process.env.WECHAT_CORP_ID || process.env.WECOM_CORP_ID || "";
 const WECHAT_ENCODING_AES_KEY =
   process.env.WECHAT_ENCODING_AES_KEY || process.env.WECOM_ENCODING_AES_KEY || "";
+const WECHAT_AGENT_ID = process.env.WECHAT_AGENT_ID || process.env.WECOM_AGENT_ID || "";
+const WECHAT_CORP_SECRET = process.env.WECHAT_CORP_SECRET || process.env.WECOM_CORP_SECRET || "";
 const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 220);
 const KNOWLEDGE_MAX_CHARS = Number(process.env.KNOWLEDGE_MAX_CHARS || 32000);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
@@ -41,6 +43,8 @@ function loadAvatarKnowledge() {
 }
 
 const avatarKnowledge = loadAvatarKnowledge();
+let wechatAccessToken = "";
+let wechatAccessTokenExpiresAt = 0;
 
 const handoffKeywords = (process.env.HUMAN_HANDOFF_KEYWORDS ||
   "付款,合同,退款,投诉,能便宜吗,转人工,本人,老板,报价单,最终报价")
@@ -174,6 +178,75 @@ function buildTextXml({ toUser, fromUser, content }) {
     `<Content><![CDATA[${content}]]></Content>`,
     "</xml>",
   ].join("");
+}
+
+function splitReply(reply) {
+  const parts = String(reply || "")
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length ? parts : [String(reply || "").trim()].filter(Boolean);
+}
+
+function canSendWechatAppMessage() {
+  return Boolean(WECHAT_CORP_ID && WECHAT_CORP_SECRET && WECHAT_AGENT_ID);
+}
+
+async function getWechatAccessToken() {
+  if (wechatAccessToken && Date.now() < wechatAccessTokenExpiresAt) {
+    return wechatAccessToken;
+  }
+
+  const url = new URL("https://qyapi.weixin.qq.com/cgi-bin/gettoken");
+  url.searchParams.set("corpid", WECHAT_CORP_ID);
+  url.searchParams.set("corpsecret", WECHAT_CORP_SECRET);
+
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.errcode !== 0 || !data.access_token) {
+    throw new Error(`WeCom gettoken failed: ${data.errcode} ${data.errmsg || ""}`);
+  }
+
+  wechatAccessToken = data.access_token;
+  wechatAccessTokenExpiresAt = Date.now() + Math.max((data.expires_in || 7200) - 300, 60) * 1000;
+  return wechatAccessToken;
+}
+
+async function sendWechatAppText({ toUser, content }) {
+  if (!canSendWechatAppMessage() || !toUser || !content) return;
+
+  const accessToken = await getWechatAccessToken();
+  const response = await fetch(`https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${accessToken}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      touser: toUser,
+      msgtype: "text",
+      agentid: Number(WECHAT_AGENT_ID),
+      text: {
+        content,
+      },
+      safe: 0,
+    }),
+  });
+  const data = await response.json();
+  if (data.errcode !== 0) {
+    throw new Error(`WeCom message/send failed: ${data.errcode} ${data.errmsg || ""}`);
+  }
+}
+
+function sendRemainingReplyParts({ toUser, parts }) {
+  if (!canSendWechatAppMessage() || parts.length <= 1) return;
+
+  parts.slice(1).forEach((part, index) => {
+    setTimeout(() => {
+      sendWechatAppText({ toUser, content: part }).catch((error) => {
+        console.error("WeCom active message failed", error.message);
+      });
+    }, 900 * (index + 1));
+  });
 }
 
 function needsHumanHandoff(text) {
@@ -428,10 +501,12 @@ async function handleWechatCallback(req, res) {
     const content = extractXmlValue(messageXml, "Content");
 
     const reply = await generateAiReply(content);
+    const replyParts = splitReply(reply);
+    sendRemainingReplyParts({ toUser: fromUser, parts: replyParts });
     const xml = buildTextXml({
       toUser: fromUser,
       fromUser: toUser,
-      content: reply,
+      content: replyParts[0] || "",
     });
 
     res.writeHead(200, { "Content-Type": "application/xml; charset=utf-8" });
@@ -460,8 +535,9 @@ async function handleTestChat(req, res) {
   }
 
   const reply = await generateAiReply(message);
+  const replyParts = splitReply(reply);
   res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify({ reply }));
+  res.end(JSON.stringify({ reply: replyParts[0] || "", replies: replyParts }));
 }
 
 async function handleRequest(req, res) {
