@@ -18,7 +18,9 @@ services:
       - key: AI_TIMEOUT_MS
         value: "25000"
       - key: MAX_REPLY_CHARS
-        value: "180"
+        value: "700"
+      - key: KNOWLEDGE_MAX_CHARS
+        value: "32000"
       - key: HUMAN_HANDOFF_KEYWORDS
         value: 付款,合同,退款,投诉,能便宜吗,转人工,本人,老板
       - key: WECHAT_TOKEN

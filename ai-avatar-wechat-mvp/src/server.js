@@ -1,19 +1,43 @@
 const http = require("http");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 const PORT = Number(process.env.PORT || 8787);
 const WECHAT_TOKEN = process.env.WECHAT_TOKEN || "dev-token";
 const WECHAT_CORP_ID = process.env.WECHAT_CORP_ID || process.env.WECOM_CORP_ID || "";
 const WECHAT_ENCODING_AES_KEY =
   process.env.WECHAT_ENCODING_AES_KEY || process.env.WECOM_ENCODING_AES_KEY || "";
-const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 180);
+const MAX_REPLY_CHARS = Number(process.env.MAX_REPLY_CHARS || 700);
+const KNOWLEDGE_MAX_CHARS = Number(process.env.KNOWLEDGE_MAX_CHARS || 32000);
 const AI_API_KEY = process.env.AI_API_KEY || process.env.OPENAI_API_KEY || "";
 const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "");
 const AI_MODEL = process.env.AI_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const AI_API_STYLE = process.env.AI_API_STYLE || "responses";
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 25000);
 const DEFAULT_SYSTEM_PROMPT =
-  "你是微信里的 AI 客服助手。回复要简洁、自然、中文口语化。不确定就说需要本人确认。涉及付款、合同、退款、投诉、法律、医疗、投资、最终价格、折扣时必须转人工。";
+  "你是毛豆，嘉瑞品牌设计总监。你在企业微信里和客户正常聊天，负责初步沟通、需求诊断和专业答疑。";
+const KNOWLEDGE_PATH = path.join(__dirname, "..", "knowledge", "jiarui-brand-avatar-knowledge.md");
+const AVATAR_STYLE_PROMPT = [
+  "你必须像一个正常人在微信里说话，不要像客服机器人。",
+  "身份：你是毛豆本人风格的智能分身。不要自称 AI、机器人、助手，也不要说“根据资料库”。",
+  "语气：专业但不端着，口语、松弛、有观点；可以说“说实话”“简单讲”“这个要看情况”。",
+  "回复长度：多数情况下 1-4 句，复杂问题最多 2-3 个短段落。不要一上来写长篇说明。",
+  "互动方式：先接住对方的话，再给判断；如果信息不够，最后自然追问一个关键问题。",
+  "格式：少用项目符号和编号，除非客户明确问流程、报价、清单。不要使用 Markdown 标题。",
+  "边界：涉及最终报价、合同、付款、退款、投诉、法律风险、重大承诺时，不要直接拍板，要说需要本人/团队确认。",
+].join("\n");
+
+function loadAvatarKnowledge() {
+  try {
+    return fs.readFileSync(KNOWLEDGE_PATH, "utf8").slice(0, KNOWLEDGE_MAX_CHARS);
+  } catch (error) {
+    console.warn("Avatar knowledge file not loaded", error.message);
+    return "";
+  }
+}
+
+const avatarKnowledge = loadAvatarKnowledge();
 
 const handoffKeywords = (process.env.HUMAN_HANDOFF_KEYWORDS ||
   "付款,合同,退款,投诉,能便宜吗,转人工,本人,老板")
@@ -153,18 +177,43 @@ function needsHumanHandoff(text) {
   return handoffKeywords.some((keyword) => text.includes(keyword));
 }
 
+function buildSystemPrompt() {
+  const extraPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+  return [
+    DEFAULT_SYSTEM_PROMPT,
+    "",
+    "【微信聊天风格】",
+    AVATAR_STYLE_PROMPT,
+    "",
+    "【额外要求】",
+    extraPrompt,
+    avatarKnowledge ? ["", "【嘉瑞品牌话术资料库】", avatarKnowledge].join("\n") : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function cleanReply(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/^(毛豆[:：]\s*)/i, "")
+    .trim()
+    .slice(0, MAX_REPLY_CHARS);
+}
+
 async function generateAiReply(customerText) {
   if (needsHumanHandoff(customerText)) {
-    return "这个问题需要本人或团队确认后再回复你，避免我说得不准确。我先帮你记录下来。";
+    return "这个我先不直接拍板哈，容易说偏。\n\n我帮你记下来，具体价格、合同或者付款这些，还是让本人/团队确认后再回复你。";
   }
 
-  const fallback = "你好，我是 AI 助手，可以先帮你解答常见问题。你可以简单说下你的需求、预算和希望解决的问题。";
+  const fallback = "你好，我是毛豆。\n\n你可以先简单说下你想解决什么问题，是品牌升级、包装、画册，还是展厅/网站这类？";
 
   if (!AI_API_KEY) {
     return fallback;
   }
 
-  const systemPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
+  const systemPrompt = buildSystemPrompt();
   let response;
 
   try {
@@ -192,7 +241,7 @@ async function generateAiReply(customerText) {
           .join("") ||
         fallback;
 
-  return text.slice(0, MAX_REPLY_CHARS);
+  return cleanReply(text || fallback) || fallback;
 }
 
 function callResponses({ systemPrompt, customerText }) {
@@ -246,7 +295,7 @@ function callChatCompletions({ systemPrompt, customerText }) {
         },
       ],
       temperature: 0.4,
-      max_tokens: 300,
+      max_tokens: 650,
     }),
   }).finally(() => clearTimeout(timeout));
 }
