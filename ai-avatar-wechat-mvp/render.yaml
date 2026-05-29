@@ -21,6 +21,10 @@ services:
         value: "120"
       - key: KNOWLEDGE_MAX_CHARS
         value: "32000"
+      - key: MEMORY_TTL_HOURS
+        value: "168"
+      - key: MEMORY_MAX_TURNS
+        value: "12"
       - key: HUMAN_HANDOFF_KEYWORDS
         value: 付款,合同,退款,投诉,能便宜吗,转人工,本人,老板
       - key: WECHAT_TOKEN

@@ -20,6 +20,9 @@ const AI_MODEL = process.env.AI_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mi
 const AI_API_STYLE = process.env.AI_API_STYLE || "responses";
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 25000);
 const APP_VERSION = process.env.RENDER_GIT_COMMIT || process.env.APP_VERSION || "local";
+const MEMORY_TTL_MS = Number(process.env.MEMORY_TTL_HOURS || 168) * 60 * 60 * 1000;
+const MEMORY_MAX_TURNS = Number(process.env.MEMORY_MAX_TURNS || 12);
+const MEMORY_FILE_PATH = process.env.MEMORY_FILE_PATH || path.join("/tmp", "ai-avatar-conversations.json");
 const DEFAULT_SYSTEM_PROMPT =
   "你是毛豆，嘉瑞品牌设计总监。你在企业微信里和客户正常聊天，负责初步沟通、需求诊断和专业答疑。";
 const KNOWLEDGE_PATH = path.join(__dirname, "..", "knowledge", "jiarui-brand-avatar-knowledge.md");
@@ -54,6 +57,7 @@ let wechatKfAccessToken = "";
 let wechatKfAccessTokenExpiresAt = 0;
 const kfCursors = new Map();
 const handledKfMsgIds = new Set();
+const conversations = loadConversationStore();
 
 const handoffKeywords = (process.env.HUMAN_HANDOFF_KEYWORDS ||
   "付款,合同,退款,投诉,能便宜吗,转人工,本人,老板,报价单,最终报价")
@@ -93,6 +97,62 @@ function readBody(req) {
     req.on("end", () => resolve(body));
     req.on("error", reject);
   });
+}
+
+function loadConversationStore() {
+  try {
+    if (!fs.existsSync(MEMORY_FILE_PATH)) return new Map();
+    const raw = JSON.parse(fs.readFileSync(MEMORY_FILE_PATH, "utf8"));
+    return new Map(Object.entries(raw));
+  } catch (error) {
+    console.warn("Conversation memory not loaded", error.message);
+    return new Map();
+  }
+}
+
+function saveConversationStore() {
+  try {
+    fs.mkdirSync(path.dirname(MEMORY_FILE_PATH), { recursive: true });
+    fs.writeFileSync(MEMORY_FILE_PATH, JSON.stringify(Object.fromEntries(conversations), null, 2));
+  } catch (error) {
+    console.warn("Conversation memory not saved", error.message);
+  }
+}
+
+function getConversation(conversationId) {
+  if (!conversationId) return { turns: [] };
+  const existing = conversations.get(conversationId);
+  if (!existing) return { turns: [] };
+  if (Date.now() - Number(existing.updatedAt || 0) > MEMORY_TTL_MS) {
+    conversations.delete(conversationId);
+    saveConversationStore();
+    return { turns: [] };
+  }
+  return existing;
+}
+
+function rememberConversation(conversationId, customerText, replyText) {
+  if (!conversationId || !customerText || !replyText) return;
+  const conversation = getConversation(conversationId);
+  const turns = Array.isArray(conversation.turns) ? conversation.turns : [];
+  turns.push({
+    customer: String(customerText).slice(0, 300),
+    avatar: String(replyText).slice(0, 300),
+    at: Date.now(),
+  });
+  conversations.set(conversationId, {
+    updatedAt: Date.now(),
+    turns: turns.slice(-MEMORY_MAX_TURNS),
+  });
+  saveConversationStore();
+}
+
+function buildConversationContext(conversation) {
+  const turns = Array.isArray(conversation?.turns) ? conversation.turns.slice(-6) : [];
+  if (!turns.length) return "";
+  return turns
+    .map((turn) => `客户：${turn.customer}\n毛豆：${turn.avatar}`)
+    .join("\n");
 }
 
 async function readJson(req) {
@@ -345,7 +405,7 @@ async function replyToWechatKfMessage(message) {
   if (message.origin !== 3 || message.msgtype !== "text" || !message.text?.content) return;
   if (rememberKfMsgId(message.msgid)) return;
 
-  const reply = await generateAiReply(message.text.content);
+  const reply = await generateAiReply(message.text.content, message.external_userid);
   const parts = splitReply(reply);
   const part = parts[0];
   if (!part) return;
@@ -381,7 +441,23 @@ function isPricingQuestion(text) {
   return /多少钱|怎么收费|收费|价格|报价|费用|预算/.test(text);
 }
 
-function directShortReply(text) {
+function directShortReply(text, conversationContext = "") {
+  if (/拜访客户|客户拜访|销售拜访/.test(text) && /画册/.test(conversationContext)) {
+    return "明白，主要是拜访客户用。你们是做什么产品的？";
+  }
+
+  if (/展会|参展/.test(text) && /画册/.test(conversationContext)) {
+    return "明白，展会用。你们更想突出产品，还是公司实力？";
+  }
+
+  if (/企业介绍|公司介绍/.test(text) && /画册/.test(conversationContext)) {
+    return "懂了，偏企业形象册。主要给客户看，还是给经销商看？";
+  }
+
+  if (/产品画册|产品手册/.test(text) && /画册/.test(conversationContext)) {
+    return "明白，偏产品画册。产品型号多吗？";
+  }
+
   if (/我要|想|准备|需要|打算/.test(text) && /画册/.test(text)) {
     return "可以做。这个画册主要是拜访客户用，还是展会用？";
   }
@@ -409,13 +485,21 @@ function directShortReply(text) {
   return "";
 }
 
-function buildSystemPrompt() {
+function buildSystemPrompt(conversationContext = "") {
   const extraPrompt = process.env.AVATAR_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT;
   return [
     DEFAULT_SYSTEM_PROMPT,
     "",
     "【微信聊天风格】",
     AVATAR_STYLE_PROMPT,
+    conversationContext
+      ? [
+          "",
+          "【本轮会话记忆】",
+          conversationContext,
+          "回复时要承接上面的上下文，不要把客户当成第一次咨询。客户如果继续回答上一个问题，就顺着聊，不要重新开场。",
+        ].join("\n")
+      : "",
     "",
     "【额外要求】",
     extraPrompt,
@@ -442,35 +526,43 @@ function cleanReply(text) {
   return cleaned;
 }
 
-async function generateAiReply(customerText) {
+async function generateAiReply(customerText, conversationId = "") {
+  const conversation = getConversation(conversationId);
+  const conversationContext = buildConversationContext(conversation);
+  const finalizeReply = (reply) => {
+    const finalReply = cleanReply(reply) || "可以聊。你现在最想先解决什么问题？";
+    rememberConversation(conversationId, customerText, finalReply);
+    return finalReply;
+  };
+
   if (needsHumanHandoff(customerText)) {
-    return "这个我先不直接拍板，容易说偏。价格、合同这些让本人确认后再回你。";
+    return finalizeReply("这个我先不直接拍板，容易说偏。价格、合同这些让本人确认后再回你。");
   }
 
   if (isRecentCasualQuestion(customerText)) {
-    return "最近还是在琢磨品牌这件事。你呢，最近在忙什么项目？";
+    return finalizeReply("最近还是在琢磨品牌这件事。你呢，最近在忙什么项目？");
   }
 
   if (isGreeting(customerText)) {
-    return "嗨，你好呀。你是想聊品牌视觉，还是先随便问问？";
+    return finalizeReply("嗨，你好呀。你是想聊品牌视觉，还是先随便问问？");
   }
 
   if (isPricingQuestion(customerText)) {
-    return "这个要看范围，不能一口价乱报。你想先做哪一块？";
+    return finalizeReply("这个要看范围，不能一口价乱报。你想先做哪一块？");
   }
 
-  const shortReply = directShortReply(customerText);
+  const shortReply = directShortReply(customerText, conversationContext);
   if (shortReply) {
-    return shortReply;
+    return finalizeReply(shortReply);
   }
 
   const fallback = "可以聊。你现在最想先解决什么问题？";
 
   if (!AI_API_KEY) {
-    return fallback;
+    return finalizeReply(fallback);
   }
 
-  const systemPrompt = buildSystemPrompt();
+  const systemPrompt = buildSystemPrompt(conversationContext);
   let response;
 
   try {
@@ -480,12 +572,12 @@ async function generateAiReply(customerText) {
         : await callResponses({ systemPrompt, customerText });
   } catch (error) {
     console.error("AI request failed", error.message);
-    return fallback;
+    return finalizeReply(fallback);
   }
 
   if (!response.ok) {
     console.error("AI provider returned error", response.status, await response.text());
-    return fallback;
+    return finalizeReply(fallback);
   }
 
   const data = await response.json();
@@ -498,7 +590,7 @@ async function generateAiReply(customerText) {
           .join("") ||
         fallback;
 
-  return cleanReply(text || fallback) || fallback;
+  return finalizeReply(text || fallback);
 }
 
 function callResponses({ systemPrompt, customerText }) {
@@ -645,7 +737,7 @@ async function handleWechatCallback(req, res) {
       return;
     }
 
-    const reply = await generateAiReply(content);
+    const reply = await generateAiReply(content, fromUser);
     const replyParts = splitReply(reply);
     console.log(`   🤖 AI 回复: "${(replyParts[0] || "").substring(0, 100)}" (共${replyParts.length}段)`);
 
@@ -676,6 +768,7 @@ async function handleTestChat(req, res) {
 
   const body = await readJson(req);
   const message = String(body.message || "").trim();
+  const conversationId = String(body.conversationId || "test-chat").trim();
 
   if (!message) {
     res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
@@ -683,7 +776,7 @@ async function handleTestChat(req, res) {
     return;
   }
 
-  const reply = await generateAiReply(message);
+  const reply = await generateAiReply(message, conversationId);
   const replyParts = splitReply(reply);
   res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify({ reply: replyParts[0] || "", replies: replyParts }));
@@ -702,7 +795,13 @@ async function handleRequest(req, res) {
 
   if (req.url.startsWith("/health")) {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true, version: APP_VERSION, maxReplyChars: MAX_REPLY_CHARS }));
+    res.end(JSON.stringify({
+      ok: true,
+      version: APP_VERSION,
+      maxReplyChars: MAX_REPLY_CHARS,
+      memoryTtlHours: MEMORY_TTL_MS / 60 / 60 / 1000,
+      memoryConversations: conversations.size,
+    }));
     return;
   }
 
