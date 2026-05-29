@@ -561,6 +561,7 @@ function callChatCompletions({ systemPrompt, customerText }) {
 
 async function handleWechatCallback(req, res) {
   const query = parseQuery(req.url);
+  const startTime = Date.now();
 
   if (req.method === "GET") {
     if (query.msg_signature && query.echostr) {
@@ -590,12 +591,17 @@ async function handleWechatCallback(req, res) {
   }
 
   if (req.method === "POST") {
+    console.log(`\n[${new Date().toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai" })}] 📩 [POST /wechat/callback] 收到消息推送`);
+    console.log("   query:", JSON.stringify(query));
+
     const body = await readBody(req);
+    console.log("   body前200字符:", body.substring(0, 200));
     const encrypted = extractXmlValue(body, "Encrypt");
     let messageXml = body;
     let encryptedReply = false;
 
     if (query.msg_signature && encrypted) {
+      console.log("   🔐 检测到加密消息，验证签名...");
       const validEncrypted = verifyWechatEncryptedSignature({
         msgSignature: query.msg_signature,
         timestamp: query.timestamp,
@@ -611,6 +617,9 @@ async function handleWechatCallback(req, res) {
 
       messageXml = decryptWechatPayload(encrypted);
       encryptedReply = true;
+      console.log("   ✅ 解密成功, 明文前300字符:", messageXml.substring(0, 300));
+    } else {
+      console.log("   ⚠️ 未检测到加密或无签名，使用明文处理");
     }
 
     const valid = encryptedReply || verifyWechatSignature(query);
@@ -624,8 +633,12 @@ async function handleWechatCallback(req, res) {
     const toUser = extractXmlValue(messageXml, "ToUserName");
     const content = extractXmlValue(messageXml, "Content");
     const event = extractXmlValue(messageXml, "Event");
+    const msgType = extractXmlValue(messageXml, "MsgType");
+
+    console.log(`   📊 解析结果: fromUser=${fromUser}, toUser=${toUser}, msgType=${msgType || "(无)"}, event=${event || "(无)"}, content="${content?.substring(0, 50)}"`);
 
     if (event === "kf_msg_or_event") {
+      console.log("   🔔 检测到微信客服事件 → 调用 handleWechatKfEvent");
       handleWechatKfEvent(messageXml).catch((error) => {
         console.error("WeCom KF event failed", error.message);
       });
@@ -636,6 +649,8 @@ async function handleWechatCallback(req, res) {
 
     const reply = await generateAiReply(content);
     const replyParts = splitReply(reply);
+    console.log(`   🤖 AI 回复: "${(replyParts[0] || "").substring(0, 100)}" (共${replyParts.length}段)`);
+
     sendRemainingReplyParts({ toUser: fromUser, parts: replyParts });
     const xml = buildTextXml({
       toUser: fromUser,
@@ -645,11 +660,13 @@ async function handleWechatCallback(req, res) {
 
     res.writeHead(200, { "Content-Type": "application/xml; charset=utf-8" });
     res.end(encryptedReply ? buildEncryptedXml({ plainXml: xml, nonce: query.nonce || "nonce" }) : xml);
+    console.log(`   ✅ 回复已发送, 耗时: ${Date.now() - startTime}ms`);
     return;
   }
 
   res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" });
   res.end("method not allowed");
+  console.log("   ⚠️ 不支持的HTTP方法:", req.method);
 }
 
 async function handleTestChat(req, res) {
@@ -705,4 +722,13 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`AI avatar webhook listening on http://localhost:${PORT}`);
+  console.log(`   环境变量状态:`);
+  console.log(`     WECHAT_TOKEN: ${WECHAT_TOKEN ? "✅ 已配置" : "❌ 未配置"}`);
+  console.log(`     WECHAT_CORP_ID: ${WECHAT_CORP_ID ? "✅ 已配置" : "❌ 未配置"}`);
+  console.log(`     WECHAT_ENCODING_AES_KEY: ${WECHAT_ENCODING_AES_KEY ? "✅ 已配置 (" + WECHAT_ENCODING_AES_KEY.length + "字符)" : "❌ 未配置"}`);
+  console.log(`     AI_API_KEY: ${AI_API_KEY ? "✅ 已配置" : "❌ 未配置 (将使用本地匹配模式)"}`);
+  console.log(`     AI_BASE_URL: ${AI_BASE_URL}`);
+  console.log(`     AI_MODEL: ${AI_MODEL}`);
+  console.log(`     WECHAT_CORP_SECRET: ${WECHAT_CORP_SECRET ? "✅ 已配置" : "❌ 未配置 (主动推送消息需要)"}`);
+  console.log(`     WECHAT_KF_SECRET: ${WECHAT_KF_SECRET ? "✅ 已配置" : "❌ 未配置 (微信客服回复需要)"}`);
 });
