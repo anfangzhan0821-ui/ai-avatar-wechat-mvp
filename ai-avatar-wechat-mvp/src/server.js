@@ -19,6 +19,7 @@ const AI_BASE_URL = (process.env.AI_BASE_URL || process.env.OPENAI_BASE_URL || "
 const AI_MODEL = process.env.AI_MODEL || process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const AI_API_STYLE = process.env.AI_API_STYLE || "responses";
 const AI_TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS || 25000);
+const APP_VERSION = process.env.RENDER_GIT_COMMIT || process.env.APP_VERSION || "local";
 const DEFAULT_SYSTEM_PROMPT =
   "你是毛豆，嘉瑞品牌设计总监。你在企业微信里和客户正常聊天，负责初步沟通、需求诊断和专业答疑。";
 const KNOWLEDGE_PATH = path.join(__dirname, "..", "knowledge", "jiarui-brand-avatar-knowledge.md");
@@ -701,7 +702,7 @@ async function handleRequest(req, res) {
 
   if (req.url.startsWith("/health")) {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true }));
+    res.end(JSON.stringify({ ok: true, version: APP_VERSION, maxReplyChars: MAX_REPLY_CHARS }));
     return;
   }
 
